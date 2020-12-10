@@ -1,19 +1,42 @@
-from                cv2                 import      imwrite
-from               keras                import      backend
-from            keras.layers            import      Activation, Dense, Dropout, Flatten, Input, Reshape, TimeDistributed
-from     keras.layers.normalization     import      BatchNormalization
-from            keras.losses            import      binary_crossentropy
-from            keras.models            import      load_model, Model
-from          keras.optimizers          import      Adam, RMSprop
-from            keras.utils             import      plot_model
-from             matplotlib             import      pyplot
-from                mido                import      Message, MidiFile, MidiTrack
-from               numpy                import      zeros, uint8, uint32, zeros_like, argmax, amax, maximum, where, save, copy, sum, arange, squeeze, mean, std, cov, sqrt, dot, array, expand_dims, load
-from            numpy.linalg            import      svd
-from            numpy.random            import      normal, seed as seen
-from                 os                 import      mkdir, remove, walk
-from              os.path               import      exists, join 
-from               random               import      seed
+from cv2 import imwrite
+from tensorflow.keras import backend
+from tensorflow.keras.layers import Activation, Dense, Dropout, Flatten, Input, Reshape, TimeDistributed
+from tensorflow.python.keras.layers.normalization import BatchNormalization
+from keras.losses import binary_crossentropy
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.optimizers import Adam, RMSprop
+from keras.utils import plot_model
+from matplotlib import pyplot
+from mido import Message, MidiFile, MidiTrack
+from numpy import transpose, minimum, rot90, full, clip, int16, abs, sin, mod, sign, zeros, uint8, uint32, float32, zeros_like, argmax, amax, maximum, where, save, copy, sum, arange, squeeze, mean, std, cov, sqrt, dot, array, expand_dims, load, exp
+from numpy.linalg import svd
+from numpy.random import normal, seed as seen
+from os import mkdir, remove, walk
+from os.path import exists, join
+from random import seed
+from math import pi
+from wave import open
+from pyaudio import PyAudio, paContinue
+TRAIN=2000
+note_dt = 2000
+note_threshold = 32
+prev_mouse_pos = None
+mouse_pressed = 0
+cur_slider_ix = 0
+cur_control_ix = 0
+volume = 3000
+instrument = 0
+needs_update = True
+current_params = zeros((120), dtype=float32)
+current_notes = zeros((16, 96, 96), dtype=uint8)
+cur_controls = array([0.75, 0.5, 0.5], dtype=float32)
+audio = PyAudio()
+audio_notes = []
+audio_time = 0
+note_time = 0
+note_time_dt = 0
+audio_reset = False
+audio_pause = False
 def samples_to_midi(samples, file_name, threshold=0.5):
     mid = MidiFile()
     track = MidiTrack()
@@ -68,7 +91,8 @@ def generate_normalized_random_songs(x_orig, y_orig, encoder, decoder, random_ve
     pyplot.bar(arange(pca_values.shape[0]), latent_stds, align='center')
     pyplot.draw()
     pyplot.savefig(write_dir + 'latent_stds.png')
-def main():
+def setup():
+    if exists('.\\data\\README'): remove('.\\data\\README')
     backend.set_image_data_format('channels_first')
     seen(0)
     seed(0)
@@ -116,8 +140,7 @@ def main():
                         start_ix = int(start - sample_ix * 96)
                         sample[start_ix, int(note)] = 1
             except Exception as e:
-                print("ERROR ", file)
-                print(e)
+                print("ERROR ", file, e)
                 continue
             num_notes = samples[0].shape[1]
             merged_sample = zeros_like(samples[0])
@@ -195,7 +218,7 @@ def main():
     save('.\\output\\random_vectors.npy', random_vectors)
     train_loss = []
     offset = 0
-    for epoch in range(2000): # trainings
+    for epoch in range(TRAIN):
         song_start_ix = 0
         for song_ix in range(songs_qty):
             song_end_ix = song_start_ix + y_lengths[song_ix]
@@ -218,8 +241,7 @@ def main():
         pyplot.xlabel('Epoch')
         pyplot.draw()
         pyplot.savefig('.\\results\\history\\losses.png')
-        save_epoch = epoch + 1
-    write_dir = '.\\results\\history\\e' + str(save_epoch)
+    write_dir = '.\\results\\history\\e' + str(TRAIN)
     if not exists(write_dir): mkdir(write_dir)
     write_dir += '\\'
     model.save('.\\results\\history\\model.h5')
@@ -228,6 +250,170 @@ def main():
     for i in range(y_song.shape[0]): imwrite(write_dir + 'test' + '\\s' + str(i) + '.png', (1.0 - y_song[i]) * 255)
     samples_to_midi(y_song, write_dir + 'test.mid')
     generate_normalized_random_songs(x_orig, y_orig, encoder, decoder, random_vectors, write_dir)
-if __name__ == '__main__':
-    if exists('.\\data\\README'):remove('.\\data\\README')
-    main()
+def audio_callback(in_data, frame_count, time_info, status):
+    global audio_time, audio_notes, audio_reset, note_time, note_time_dt
+    if audio_reset:
+        audio_notes = []
+        audio_time = 0
+        note_time = 0
+        note_time_dt = 0
+        audio_reset = False
+    if audio_pause and status is not None: return zeros((frame_count,), dtype=float32).tobytes(), paContinue
+    while note_time_dt < audio_time + frame_count:
+        if note_time >= 1536: break
+        for note in where(current_notes[note_time // 96, note_time % 96] >= note_threshold)[0]:
+            audio_notes.append((note_time_dt, 3889 * pow(2.0, note / 12.0) / 2400000))
+        note_time += 1
+        note_time_dt += note_dt
+    data = zeros((frame_count,), dtype=float32)
+    for t, f in audio_notes:
+        x = maximum(arange(audio_time - t, audio_time + frame_count - t), 0)
+        if instrument == 0: w = sign(1 - mod(x * f, 2))
+        elif instrument == 1: w = mod(x * f - 1, 2) - 1
+        elif instrument == 2: w = 2 * abs(mod(x * f - 0.5, 2) - 1) - 1
+        elif instrument == 3: w = sin(x * f * pi)
+        w[x == 0] = 0
+        w *= volume * exp(-x / 9600)
+        data += w
+    data = clip(data, -32000, 32000).astype(int16)
+    audio_time += frame_count
+    audio_notes = [(t, f) for t, f in audio_notes if audio_time < t + 20000]
+    if note_time / 96 >= 16:
+        audio_time = 0
+        note_time = 0
+        note_time_dt = 0
+        audio_notes = []
+    return data.tobytes(), paContinue
+def get_pianoroll_from_notes(notes):
+    output = full((3, 200, 800), 64, dtype=uint8)
+    for i in range(2):
+        for j in range(8):
+            measure = rot90(notes[i * 8 + j])
+            played_only = where(measure >= note_threshold, 255, 0)
+            output[0, 2 + i * 100:98 + i * 100, 2 + j * 100:98 + j * 100] = minimum(measure * (255.0 / note_threshold), 255.0)
+            output[1, 2 + i * 100:98 + i * 100, 2 + j * 100:98 + j * 100] = played_only
+            output[2, 2 + i * 100:98 + i * 100, 2 + j * 100:98 + j * 100] = played_only
+    return transpose(output, (2, 1, 0))
+def main():
+    import pygame
+    if not exists(f'results\\history\\e{TRAIN}'): setup()
+    global mouse_pressed, current_notes, audio_pause, needs_update, current_params, prev_mouse_pos, audio_reset, instrument, cur_slider_ix, cur_control_ix, note_threshold, note_dt, volume
+    backend.set_image_data_format('channels_first')
+    model = load_model('results\\history\\model.h5')
+    encoder = Model(inputs=model.input, outputs=model.get_layer('encoder').output)
+    decoder = backend.function([model.get_layer('decoder').input, backend.learning_phase()], [model.layers[-1].output])
+    latent_means = load(f'results\\history\\e{TRAIN}\\latent_means.npy')
+    latent_stds = load(f'results\\history\\e{TRAIN}\\latent_stds.npy')
+    latent_pca_values = load(f'results\\history\\e{TRAIN}\\latent_pca_values.npy')
+    latent_pca_vectors = load(f'results\\history\\e{TRAIN}\\latent_pca_vectors.npy')
+    y_samples = load('.\\output\\samples.npy')
+    y_lengths = load('.\\output\\lengths.npy')
+    pygame.init()
+    pygame.font.init()
+    screen = pygame.display.set_mode((800, 440))
+    notes_surface = screen.subsurface((0, 210, 800, 200))
+    pygame.display.set_caption('Neural Composer')
+    audio_stream = audio.open(format=audio.get_format_from_width(2), channels=1, rate=48000, output=True, stream_callback=audio_callback)
+    audio_stream.start_stream()
+    running = True
+    random_song_ix = 0
+    cur_len = 0
+    note_threshold = 210 - cur_controls[0] * 200
+    note_dt = 2000 - cur_controls[1] * 1800
+    volume = cur_controls[2] * 6000
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if pygame.mouse.get_pressed()[0]:
+                    prev_mouse_pos = pygame.mouse.get_pos()
+                    if 5 <= prev_mouse_pos[0] < 805 and 5 <= prev_mouse_pos[1] < 215:
+                        cur_slider_ix = (prev_mouse_pos[0] - 5) // 19
+                        mouse_pressed = 1
+                    if 85 <= prev_mouse_pos[0] < 715 and 410 <= prev_mouse_pos[1] < 440:
+                        cur_control_ix = (prev_mouse_pos[0] - 85) // 210
+                        mouse_pressed = 2
+                    if mouse_pressed == 1 and 5 <= prev_mouse_pos[1] <= 205:
+                        current_params[int(cur_slider_ix)] = prev_mouse_pos[1] / 20 - 5.25
+                        needs_update = True
+                    elif mouse_pressed == 2 and 90 <= prev_mouse_pos[0] - cur_control_ix * 210 <= 290:
+                        cur_controls[int(cur_control_ix)] = (prev_mouse_pos[0] - 90 - cur_control_ix * 210) / 200
+                        note_threshold = 210 - cur_controls[0] * 200
+                        note_dt = 2000 - cur_controls[1] * 1800
+                        volume = cur_controls[2] * 6000
+                elif pygame.mouse.get_pressed()[2]:
+                    current_params = zeros((120), dtype=float32)
+                    needs_update = True
+            elif event.type == pygame.MOUSEBUTTONUP:
+                mouse_pressed = 0
+                prev_mouse_pos = None
+            elif event.type == pygame.MOUSEMOTION and mouse_pressed > 0:
+                if mouse_pressed == 1 and 5 <= pygame.mouse.get_pos()[1] <= 205:
+                    current_params[int(cur_slider_ix)] = pygame.mouse.get_pos()[1] / 20 - 5.25
+                    needs_update = True
+                elif mouse_pressed == 2 and 90 <= pygame.mouse.get_pos()[0] - cur_control_ix * 210 <= 290:
+                    cur_controls[int(cur_control_ix)] = (pygame.mouse.get_pos()[0] - 90 - cur_control_ix * 210) / 200
+                    note_threshold = 210 - cur_controls[0] * 200
+                    note_dt = 2000 - cur_controls[1] * 1800
+                    volume = cur_controls[2] * 6000
+            elif event.type == pygame.KEYDOWN:
+                if event.key in [pygame.K_r, pygame.K_e]:
+                    current_params = clip(normal(0.0, 2.0 if event.key == pygame.K_e else 1.0, (120)), -5, 5)
+                    needs_update = True
+                    audio_reset = True
+                if event.key == pygame.K_o:
+                    current_notes = y_samples[cur_len:cur_len + 16] * 255
+                    latent_x = encoder.predict(expand_dims(y_samples[cur_len:cur_len + 16], 0), batch_size=1)[0]
+                    cur_len += y_lengths[random_song_ix]
+                    random_song_ix += 1
+                    current_params = dot(latent_x - latent_means, latent_pca_vectors.T) / latent_pca_values
+                    needs_update = True
+                    audio_reset = True
+                if event.key == pygame.K_m:
+                    audio_pause = True
+                    audio_reset = True
+                    samples_to_midi(current_notes, 'results/live.mid', note_threshold)
+                    audio_pause = False
+                if event.key == pygame.K_w:
+                    audio_pause = True
+                    audio_reset = True
+                    save_audio = b''
+                    while True:
+                        save_audio += audio_callback(None, 1024, None, None)[0]
+                        if not audio_time: break
+                    wave_output = open('results/live.wav', 'w')
+                    wave_output.setparams((1, 2, 48000, 0, 'NONE', 'not compressed'))
+                    wave_output.writeframes(save_audio)
+                    wave_output.close()
+                    audio_pause = False
+                if event.key in [pygame.K_ESCAPE, pygame.Quit]:
+                    running = False
+                    break
+                if event.key == pygame.K_SPACE: audio_pause = not audio_pause
+                if event.key == pygame.K_TAB: audio_reset = True
+                if event.key == pygame.K_1: instrument = 0
+                if event.key == pygame.K_2: instrument = 1
+                if event.key == pygame.K_3: instrument = 2
+                if event.key == pygame.K_4: instrument = 3
+                if event.key == pygame.K_c:
+                    current_params = dot(encoder.predict(expand_dims(where(current_notes > note_threshold, 1, 0), 0))[0] - latent_means, latent_pca_vectors.T) / latent_pca_values
+                    needs_update = True
+        if needs_update:
+            current_notes = (decoder([expand_dims(latent_means + dot(current_params * latent_pca_values, latent_pca_vectors), axis=0), 0])[0][0] * 255.0).astype(uint8)
+            needs_update = False
+        screen.fill((210, 210, 210))
+        pygame.surfarray.blit_array(notes_surface, get_pianoroll_from_notes(current_notes))
+        pygame.draw.rect(screen, (255, 255, 0), (2 + (note_time // 96 % 8) * 100 + note_time % 96, 212 + (note_time // 768) * 100, 4, 96), 0)
+        for i in range(40):
+            slider_color = [(90, 20, 20), (90, 90, 20), (20, 90, 20), (20, 90, 90), (20, 20, 90), (90, 20, 90)][i % 6]
+            pygame.draw.line(screen, slider_color, (14.5 + i * 19, 5), (14.5 + i * 19, 205))
+            for j in range(11): pygame.draw.line(screen, (0, 0, 0) if j == 5 else slider_color, (9 + i * 19, 5 + j * 20), (20 + i * 19, 5 + j * 20))
+            pygame.draw.circle(screen, slider_color, (14 + i * 19, int(20 * current_params[i] + 105)), 7)
+        for i in range(3):
+            pygame.draw.rect(screen, [(255, 0, 0), (0, 255, 0), (0, 0, 255)][i], (90 + i * 210, 415, int(200 * cur_controls[i]), 20))
+            pygame.draw.rect(screen, (0, 0, 0), (90 + i * 210, 415, 200, 20), 1)
+        pygame.display.flip()
+        pygame.time.wait(10)
+    audio_stream.stop_stream()
+    audio_stream.close()
+    audio.terminate()
+if __name__ == '__main__': main()
