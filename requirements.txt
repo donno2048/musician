@@ -1,0 +1,8 @@
+opencv-python
+mido
+matplotlib
+pyaudio
+pygame
+numpy==1.19.3
+keras==2.1.5
+https://storage.googleapis.com/tensorflow/windows/cpu/tensorflow_cpu-2.3.0-cp36-cp36m-win_amd64.whl
