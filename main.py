@@ -17,6 +17,7 @@ from random import seed
 from math import pi
 from wave import open
 from pyaudio import PyAudio, paContinue
+from shutil import rmtree
 TRAIN=2000
 note_dt = 2000
 note_threshold = 32
@@ -296,7 +297,12 @@ def get_pianoroll_from_notes(notes):
     return transpose(output, (2, 1, 0))
 def main():
     import pygame
-    if not exists(f'results\\history\\e{TRAIN}'): setup()
+    if not exists(f'results\\history\\e{TRAIN}'):
+        try: setup()
+        except Exception as e:
+            rmtree('output')
+            rmtree('results')
+            raise(e)
     global mouse_pressed, current_notes, audio_pause, needs_update, current_params, prev_mouse_pos, audio_reset, instrument, cur_slider_ix, cur_control_ix, note_threshold, note_dt, volume
     backend.set_image_data_format('channels_first')
     model = load_model('results\\history\\model.h5')
